@@ -34,6 +34,11 @@ AI agent ──MCP 工具 post_bounty──▶ Errandkite（Cloudflare Workers�
 
 TypeScript、Hono、Cloudflare Workers、D1、`@x402/hono`。付费网关的 `kite.ts` 来自 [gokite-ai/kite-x402-services](https://github.com/gokite-ai/kite-x402-services) 的 typescript-express 模板（Apache-2.0），原样复用，仅把 Express 适配层换成 Hono；接入后会在源码和此处标注来源。
 
+## 文档
+
+- [项目提案](docs/PROPOSAL.md)：目标用户、使用场景、KiteAI 关联点、技术方案、验收标准
+- [参考仓库研究](docs/REFERENCE_STUDY.md)：五个参考仓库的比较和对本项目的结论
+
 ## 许可证
 
 [Apache-2.0](LICENSE)
