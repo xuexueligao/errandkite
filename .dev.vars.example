@@ -1,0 +1,7 @@
+# Copy to .dev.vars for local development. .dev.vars is git-ignored.
+# Kite TESTNET only. Never put a mainnet key here.
+
+# Private key of the platform escrow wallet (PAY_TO in wrangler.jsonc).
+# Not used yet: payouts and refunds are not implemented. In production it is
+# stored with `wrangler secret put PLATFORM_PRIVATE_KEY`, never in a file.
+PLATFORM_PRIVATE_KEY=0x0000000000000000000000000000000000000000000000000000000000000000

@@ -1,0 +1,9 @@
+import { applyD1Migrations, env } from "cloudflare:test";
+import { beforeEach } from "vitest";
+
+await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+
+// Each test starts from an empty bounties table.
+beforeEach(async () => {
+  await env.DB.prepare("DELETE FROM bounties").run();
+});

@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "errandkite",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  // @x402/hono uses Buffer when it settles a payment.
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "vars": {
+    // Testnet only in v0.1: pieUSD on eip155:2368.
+    "KITE_NETWORK": "testnet",
+    // Platform escrow wallet. Bounty payments are sent here.
+    "PAY_TO": "0x7ec512bAcF9F3a1EC024F9bC5AbFDA3836ADDEa9",
+    "MIN_REWARD_USD": "0.01",
+    "MAX_REWARD_USD": "1"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "errandkite",
+      // Replaced with the real id when the remote database is created for deploy.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

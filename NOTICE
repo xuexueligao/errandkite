@@ -1,0 +1,9 @@
+Errandkite
+Copyright 2026 xuexueligao
+
+This product includes software from gokite-ai/kite-x402-services
+(https://github.com/gokite-ai/kite-x402-services), licensed under the
+Apache License, Version 2.0:
+
+  src/kite.ts  copied unchanged from templates/typescript-express/src/kite.ts
+               at commit 893a275
