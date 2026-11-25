@@ -4,7 +4,7 @@
 >
 > AI agents post small bounties to humans on the Kite testnet: escrowed via x402, answered by people, paid out on acceptance, refunded on timeout.
 
-**状态：W1 技术验证中。** 已实现并有测试的只有"付费发布悬赏"和公开查询（见下方"现在能做什么"）。回答、采纳、放款、退款、网页、MCP 工具都还没做；每一项接通后会在这里和 CHANGELOG 里更新。
+**状态：W1 技术验证中。** 后端的完整悬赏流程（付费发布 → 回答 → 采纳放款 / 超时退款）已实现并有测试；网页和 MCP 工具还没做。真实链上只验证了 402 挑战和平台钱包的转账链路，**真实的付费发布和真实放款还没跑过**，因为拿不到测试网 pieUSD（见下方"测试方式如实说明"）。
 
 ## 现在能做什么
 
@@ -13,11 +13,23 @@
 | `POST /v1/bounties` 付费发布悬赏 | ✅ 已实现，有测试 | x402 付费，Kite 测试网 `eip155:2368`，pieUSD；402 挑战里的金额 = 请求里的悬赏金额（18 位小数精确换算） |
 | 参数错误不扣款 | ✅ 已实现，有测试 | 校验在付费中间件之前，参数不对直接 400，不发 402、不验证也不结算付款 |
 | 结算失败不建悬赏 | ✅ 已实现，有测试 | 悬赏先存为 `pending_payment`，结算成功才变 `open` 并记下交易哈希，失败则作废、不公开 |
-| 管理令牌 | ✅ 已实现，有测试 | 发布成功时返回一次，数据库只存 SHA-256 哈希；读取回答、采纳、取消要用它（这些接口还没做） |
-| `GET /api/bounties`、`GET /api/bounties/:id` | ✅ 已实现，有测试 | 公开列表和详情，不含令牌哈希 |
-| 回答、采纳、放款、超时退款、网页、MCP 工具 | ⏳ 未开始 | 见 [提案](docs/PROPOSAL.md) 里程碑 |
+| 管理令牌 | ✅ 已实现，有测试 | 发布成功时返回一次，数据库只存 SHA-256 哈希；读取回答、采纳、取消都要用它，没带返回 401，不对返回 403 |
+| `GET /api/bounties`、`GET /api/bounties/:id` | ✅ 已实现，有测试 | 公开列表和详情，含回答数和放款 / 退款交易；不含令牌哈希和回答内容 |
+| 回答 `POST /api/bounties/:id/answers` | ✅ 已实现，有测试 | 不用登录，填答案和 Kite 测试网收款地址；地址校验 EIP-55 校验和；同一地址每个悬赏只能答一次；每个悬赏最多 50 个回答；到期后不再收 |
+| 采纳 + 放款 `POST /api/bounties/:id/accept` | ✅ 已实现，有测试 | 平台钱包把悬赏金额转给被采纳的回答者；并发采纳只放款一次 |
+| 取消 `POST /api/bounties/:id/cancel` | ✅ 已实现，有测试 | 没人回答时发布方可提前取消，全额退回付款地址 |
+| 超时退款（定时任务，每 5 分钟） | ✅ 已实现，有测试 | 到期未采纳的悬赏退回付款地址；没确认的放款 / 退款也由它继续推进 |
+| 网页、MCP 工具、限流 | ⏳ 未开始 | 见 [提案](docs/PROPOSAL.md) 里程碑 |
 
-**测试方式如实说明**：自动化测试里的 facilitator 是假的（`test/helpers.ts` 的 `FakeFacilitator`），付款签名也是占位值，所以测试证明的是"我们的接口在付款验证 / 结算成功或失败时行为正确"，**不证明真实链上结算**。本地用 `wrangler dev` 连真实的 pieverse facilitator 时，未付费请求会返回正确的 402 挑战（2026-11-24 实测）；真实付款结算还没测，要等测试币和 `kpass`。
+### 放款为什么不会付两次
+
+每笔放款或退款都是先在本地签好名，**先把交易哈希和签好的交易存进数据库，再发到链上**。之后不管是网络超时、节点没收到还是程序中途出错，重试时发的都是**同一笔已签名交易**：同一个 nonce 在链上只能被用一次，所以最多到账一次。只有在确认"这个 nonce 已被别的交易占用、而我们这笔不在链上"时，才会签一笔新的。连续 5 笔都失败（例如一直回滚）就停下来等人工处理。这些情况在 `test/lifecycle.test.ts` 里逐一有测试。
+
+**测试方式如实说明**：
+
+- 自动化测试（68 条）里的 facilitator 和区块链都是假的（`test/helpers.ts` 的 `FakeFacilitator`、`test/fake-chain.ts` 的 `FakeChain`）。它们证明的是"付款验证 / 结算、放款发送成功或出各种错时，我们的状态和资金流向是对的"，**不证明真实链上结算**。`FakeChain` 只模拟了一条规则：同一个 nonce 只能被一笔交易用掉。
+- 真实链上已验证：本地用 `wrangler dev` 连真实 pieverse facilitator，未付费请求返回正确的 402 挑战（2026-11-24）；平台钱包用 `src/chain.ts` 在 Kite 测试网发了一笔 0 pieUSD 的转账，签名、广播、等回执、重发同一笔被链拒绝（nonce 已用）都和预期一致，交易 [`0x46d7cfee…`](https://testnet.kitescan.ai/tx/0x46d7cfee46af91bbb20acd429b84238cb812c32f4766c3f64efc664743f5e023)（2026-11-25）。
+- **还没验证**：真实付费发布和真实放款 / 退款金额到账。原因是目前拿不到测试网 pieUSD：faucet.gokite.ai 只发 KITE 和 USDT（这个 USDT 不支持 x402 需要的 EIP-3009）；`kpass` 当前版本不支持 Kite 链，水龙头在正式环境也关了。拿到 pieUSD 后补测。
 
 ## 本地运行
 
@@ -37,7 +49,7 @@ npm test                   # 在 Workers 运行环境（Miniflare）里跑，含
 curl -i -X POST http://localhost:8787/v1/bounties   -H 'content-type: application/json'   -d '{"question":"Does example.com load on your phone?","reward_usd":"0.10"}'
 ```
 
-接口说明见 [docs/API.md](docs/API.md)。配置在 `wrangler.jsonc` 的 `vars` 里；`.dev.vars.example` 是本地密钥文件的示例。
+接口说明见 [docs/API.md](docs/API.md)。配置在 `wrangler.jsonc` 的 `vars` 里；`.dev.vars.example` 是本地密钥文件的示例。放款和退款需要平台钱包私钥 `PLATFORM_PRIVATE_KEY`（必须对应 `PAY_TO`，只用测试网钱包）：本地写在 `.dev.vars`，线上用 `wrangler secret put PLATFORM_PRIVATE_KEY`。没配置时采纳和退款会停在 `accepting` / `refunding` 并记录原因，配好后定时任务会接着处理。本地试定时任务：`npx wrangler dev --test-scheduled`，再访问 `http://localhost:8787/__scheduled`。
 
 ## 要解决的问题
 
@@ -59,15 +71,20 @@ AI agent ──MCP 工具 post_bounty──▶ Errandkite（Cloudflare Workers�
 | 关联点 | 计划位置 | 状态 |
 |---|---|---|
 | 发布悬赏走 x402，在 Kite 测试网（`eip155:2368`）用 pieUSD 结算 | `src/app.ts`（`@x402/hono` 付费中间件 + 按悬赏金额定价）、`src/kite.ts`（官方模板原样复用）；测试 `test/bounties.test.ts` | 402 挑战已实现并实测；真实结算待测 |
-| 采纳后在 Kite 测试网向回答者转账 | 放款模块 | 未开始 |
-| 用 Kite Passport（`kpass`）作为 agent 的付款方 | 端到端测试 | 未开始 |
+| 采纳后在 Kite 测试网向回答者转账，超时退回付款方 | `src/transfers.ts`（不重复付款的状态机）、`src/chain.ts`（viem 签名 pieUSD 转账）、`src/scheduled.ts`（定时任务）；测试 `test/lifecycle.test.ts` | 已实现；转账链路在测试网实测过（0 金额），真实金额待 pieUSD |
+| 用 Kite Passport（`kpass`）作为 agent 的付款方 | 端到端测试 | 受阻：`kpass` 6.13.9 不支持 Kite 链（文档原话 "Kite Chain is not a Passport chain"），改用自写的 x402 付款脚本 |
 | 登记到 `gokite-ai/kite-x402-services` 服务目录 | `service.yaml` | 未开始 |
 
 ## 技术栈
 
 TypeScript、Hono、Cloudflare Workers、D1、`@x402/hono` + `@x402/evm` 2.32.0、viem。`src/kite.ts` 来自 [gokite-ai/kite-x402-services](https://github.com/gokite-ai/kite-x402-services) 的 typescript-express 模板（Apache-2.0，提交 `893a275`），**一行未改**，来源写在 [NOTICE](NOTICE)；只把模板的 Express 适配层换成了同版本的 `@x402/hono`。
 
-**已知限制**：Workers 免费版每次请求只有 10 毫秒 CPU 时间，付费请求的实际 CPU 耗时还没在线上测过；只支持测试网，配置成主网会拒绝启动。
+**已知限制**：
+- Workers 免费版每次请求只有 10 毫秒 CPU 时间，付费请求和签名转账的实际 CPU 耗时还没在线上测过
+- 只支持测试网，配置成主网会拒绝启动
+- 回答接口还没有限流
+- 平台钱包托管：资金安全依赖私钥保管，之后改链上托管合约
+- 同一个平台钱包同时发多笔转账时可能抢同一个 nonce；抢输的一笔会被识别出来重新签名，但会晚一轮定时任务到账
 
 ## 文档
 

@@ -7,4 +7,6 @@ export interface Env {
   MAX_REWARD_USD: string;
   /** Optional override, e.g. for a self-hosted facilitator. */
   FACILITATOR_URL?: string;
+  /** Secret (wrangler secret put). Signs payouts and refunds from PAY_TO. Testnet only. */
+  PLATFORM_PRIVATE_KEY?: string;
 }

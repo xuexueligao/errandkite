@@ -6,6 +6,8 @@
   // @x402/hono uses Buffer when it settles a payment.
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
+  // Every 5 minutes: refund expired bounties and finish unconfirmed payouts and refunds.
+  "triggers": { "crons": ["*/5 * * * *"] },
   "vars": {
     // Testnet only in v0.1: pieUSD on eip155:2368.
     "KITE_NETWORK": "testnet",

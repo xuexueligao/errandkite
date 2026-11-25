@@ -1,6 +1,6 @@
 # API
 
-> 只列出**已实现**的接口。计划中的接口（回答、采纳、取消等）见 [PROPOSAL.md](PROPOSAL.md) 5.3 节。
+> 只列出**已实现**的接口。还没做的（统计 `/api/stats`、MCP 工具）见 [PROPOSAL.md](PROPOSAL.md) 5.3、5.4 节。
 
 所有响应都是 JSON。错误统一是：
 
@@ -13,7 +13,15 @@
 | 400 | `invalid_json` | 请求体不是 JSON |
 | 400 | `invalid_request` | 字段不合法，`details` 列出每个字段的问题 |
 | 402 | —（x402 格式） | 没付款、付款无效或结算失败，见下文 |
-| 404 | `not_found` | 悬赏不存在或未公开，或路由不存在 |
+| 401 | `unauthorized` | 发布方接口没带 `Authorization: Bearer mt_…` |
+| 403 | `forbidden` | 管理令牌和这个悬赏不匹配（悬赏不存在也返回 403，避免用来探测 ID） |
+| 404 | `not_found` | 悬赏或回答不存在、未公开，或路由不存在 |
+| 409 | `bounty_closed` | 悬赏已到期或已结束，不再收回答 |
+| 409 | `duplicate_answer` | 这个地址已经回答过这个悬赏 |
+| 409 | `too_many_answers` | 这个悬赏的回答已到上限（50） |
+| 409 | `bounty_expired` | 采纳时悬赏已到期，会被退款 |
+| 409 | `bounty_not_acceptable` | 悬赏不在可采纳状态（例如已经采纳过） |
+| 409 | `bounty_not_cancellable` | 只有还没人回答的 `open` 悬赏能取消 |
 | 500 | `server_misconfigured` | 部署配置有误（例如 `KITE_NETWORK` 不是 testnet） |
 | 500 | `activation_failed` | 付款已结算但悬赏没能写成 `open`；响应里有 `bounty_id` 和 `payment_tx`，请保留，用于人工对账 |
 | 500 | `internal_error` | 其他未预期错误 |
@@ -63,7 +71,7 @@
        "payment_tx": "0x…"
      }
      ```
-     **`manage_token` 只返回这一次**，服务端只存它的 SHA-256 哈希。之后读取回答、采纳、取消都要用它（这些接口还没实现）。
+     **`manage_token` 只返回这一次**，服务端只存它的 SHA-256 哈希。之后读取回答、采纳、取消都要用它。
    - 结算失败：返回 402，悬赏标为 `void`，不会公开。
 
 ## `GET /api/bounties`：公开列表
@@ -71,8 +79,12 @@
 查询参数：`status`（`open`、`answered`、`accepting`、`paid`、`refunding`、`refunded` 之一，可选）、`limit`（1 到 100，默认 20）、`before`（unix 秒，翻页用，取上一页的 `next_before`）。
 
 ```json
-{ "bounties": [{ "id": "bty_…", "status": "open", "question": "…", "reward_usd": "0.10", "reward_units": "…", "network": "eip155:2368", "asset": "0x…", "source": "agent", "payer": "0x…", "payment_tx": "0x…", "created_at": 1794913600, "expires_at": 1795000000 }], "next_before": null }
+{ "bounties": [{ "id": "bty_…", "status": "paid", "question": "…", "reward_usd": "0.10", "reward_units": "…", "network": "eip155:2368", "asset": "0x…", "source": "agent", "payer": "0x…", "payment_tx": "0x…", "created_at": 1794913600, "expires_at": 1795000000, "answer_count": 2, "payout_tx": "0x…", "payout_to": "0x…", "refund_tx": null }], "next_before": null }
 ```
+
+- `payout_tx` / `payout_to`：状态是 `accepting` 或 `paid` 时有值。`accepting` 时交易可能还没上链，以 `paid` 为准
+- `refund_tx`：状态是 `refunding` 或 `refunded` 时有值，退款收款方就是 `payer`
+- 回答的内容不在公开接口里，只有 `answer_count`
 
 `pending_payment` 和 `void` 状态的悬赏永远不会出现在公开接口里。
 
@@ -85,3 +97,53 @@
 ```json
 { "ok": true, "network": "eip155:2368", "asset": "0x38129cf4…", "asset_symbol": "pieUSD", "pay_to": "0x7ec5…", "min_reward_usd": "0.01", "max_reward_usd": "1" }
 ```
+
+## `POST /api/bounties/:id/answers`：回答（公开，不用登录）
+
+```json
+{ "answer": "Yes, it loads in about 2 seconds on 4G in São Paulo.", "payout_address": "0x…" }
+```
+
+| 字段 | 规则 |
+|---|---|
+| `answer` | 1 到 2000 个字符 |
+| `payout_address` | Kite 测试网地址。大小写混合时必须通过 EIP-55 校验和（防手误）；不能是零地址或平台钱包 |
+
+返回 **201** `{ "answer": { "id": "ans_…", "bounty_id": "bty_…", "payout_address": "0x…（校验和格式）", "created_at": … } }`。第一个回答会把悬赏从 `open` 变成 `answered`。同一地址对同一悬赏只能答一次（不分大小写）；到期后返回 409 `bounty_closed`，即使定时任务还没跑。
+
+## 发布方接口（要管理令牌）
+
+请求头：`Authorization: Bearer mt_…`
+
+### `GET /api/bounties/:id/answers`
+
+```json
+{ "bounty_status": "answered", "accepted_answer_id": null, "answers": [{ "id": "ans_…", "answer": "…", "payout_address": "0x…", "created_at": 1794913700, "accepted": false }] }
+```
+
+### `POST /api/bounties/:id/accept`
+
+请求体 `{ "answer_id": "ans_…" }`。只能在 `answered` 状态、到期之前采纳，只能采纳一次。
+
+服务端把悬赏设为 `accepting`，然后从平台钱包把 `reward_units` 的 pieUSD 转给这个回答的 `payout_address`，最多等 20 秒回执：
+
+- 已确认：返回 `{ "bounty": { "status": "paid", "payout_tx": "0x…", … } }`
+- 还没确认或出错：返回 `"status": "accepting"`，`transfer_error` 写原因；定时任务会继续推进，用 `GET /api/bounties/:id` 查结果
+
+### `POST /api/bounties/:id/cancel`
+
+只能取消还没人回答的 `open` 悬赏。悬赏变为 `refunding`，全额退回 `payer`，响应格式同采纳（`refunded` 或 `refunding`）。
+
+## 定时任务（每 5 分钟）
+
+1. `open` / `answered` 且已过 `expires_at` 的悬赏 → `refunding`，退款对象是 `payer`
+2. 推进所有 `accepting` / `refunding` 的转账，每次最多 10 个
+
+### 转账怎么保证只到账一次
+
+每个悬赏最多对应一笔有效转账，记录在 `transfer_tx` / `transfer_raw`：
+
+1. 签名后**先**把交易哈希和签名后的原始交易写进数据库，再广播。两个请求同时签名时，只有先写入的那个会广播
+2. 链上查不到这笔交易：重发**同一笔**原始交易（同一个 nonce，最多被打包一次）
+3. 重发时链返回 nonce 已用，而且我们这笔仍查不到：说明它永远不会上链，才丢弃并重新签名
+4. 交易回滚：算一次失败，重新签名。累计 5 次后停止，`transfer_error` 写明需要人工处理

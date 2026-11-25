@@ -3,6 +3,8 @@ import type { FacilitatorClient } from "@x402/core/server";
 import { decodePaymentRequiredHeader, encodePaymentSignatureHeader } from "@x402/core/http";
 import type { PaymentPayload, PaymentRequirements, SettleResponse, VerifyResponse } from "@x402/core/types";
 import { createApp } from "../src/app.js";
+import { sweep } from "../src/scheduled.js";
+import { FakeChain } from "./fake-chain.js";
 
 export const PAYER = "0x1111111111111111111111111111111111111111";
 export const SETTLE_TX = `0x${"ab".repeat(32)}`;
@@ -29,11 +31,21 @@ export class FakeFacilitator implements FacilitatorClient {
   }
 }
 
-export function makeApp() {
+export interface MakeAppOptions {
+  /** null means "payouts not configured". */
+  chain?: FakeChain | null;
+  clock?: { now: number };
+}
+
+export function makeApp(options: MakeAppOptions = {}) {
   const facilitator = new FakeFacilitator();
-  const app = createApp({ facilitator });
+  const chain = options.chain === undefined ? new FakeChain() : options.chain;
+  const clock = options.clock ?? { now: Math.floor(Date.now() / 1000) };
+  const deps = { now: () => clock.now, transfers: () => chain, transferWaitMs: 1 };
+  const app = createApp({ facilitator, ...deps });
   const request = (path: string, init?: RequestInit) => app.request(path, init, env);
-  return { app, facilitator, request };
+  const runSweep = () => sweep(env, deps);
+  return { app, facilitator, request, chain, clock, runSweep };
 }
 
 export const postJson = (body: unknown, headers: Record<string, string> = {}): RequestInit => ({

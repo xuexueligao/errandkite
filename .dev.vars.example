@@ -2,6 +2,8 @@
 # Kite TESTNET only. Never put a mainnet key here.
 
 # Private key of the platform escrow wallet (PAY_TO in wrangler.jsonc).
-# Not used yet: payouts and refunds are not implemented. In production it is
-# stored with `wrangler secret put PLATFORM_PRIVATE_KEY`, never in a file.
+# Signs payouts to accepted answers and refunds to payers. Must belong to
+# PAY_TO. Without it, accepted and expired bounties wait in accepting /
+# refunding until it is set. In production it is stored with
+# `wrangler secret put PLATFORM_PRIVATE_KEY`, never in a file.
 PLATFORM_PRIVATE_KEY=0x0000000000000000000000000000000000000000000000000000000000000000

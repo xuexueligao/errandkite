@@ -1,3 +1,4 @@
+import { getAddress, isAddress, zeroAddress } from "viem";
 import type { Config } from "./config.js";
 import { decimalToUnits } from "./money.js";
 
@@ -72,4 +73,47 @@ export function parseBountyInput(body: unknown, config: Config): ParseResult {
 
   if (errors.length > 0 || rewardUnits === null) return { ok: false, errors };
   return { ok: true, value: { question, rewardUsd, rewardUnits, ttlSeconds, source } };
+}
+
+export const ANSWER_MIN = 1;
+export const ANSWER_MAX = 2000;
+
+export interface AnswerInput {
+  answer: string;
+  payoutAddress: `0x${string}`;
+}
+
+export type AnswerParseResult = { ok: true; value: AnswerInput } | { ok: false; errors: FieldError[] };
+
+/**
+ * Validates an answer. The payout address must be a valid EVM address; a
+ * mixed-case address must also pass the EIP-55 checksum, which catches typos.
+ */
+export function parseAnswerInput(body: unknown, config: Config): AnswerParseResult {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return { ok: false, errors: [{ field: "body", message: "must be a JSON object" }] };
+  }
+  const raw = body as Record<string, unknown>;
+  const errors: FieldError[] = [];
+
+  const answer = typeof raw.answer === "string" ? raw.answer.trim() : "";
+  if (typeof raw.answer !== "string") errors.push({ field: "answer", message: "is required and must be a string" });
+  else if ([...answer].length < ANSWER_MIN || [...answer].length > ANSWER_MAX) {
+    errors.push({ field: "answer", message: `must be ${ANSWER_MIN} to ${ANSWER_MAX} characters` });
+  }
+
+  let payoutAddress: `0x${string}` | null = null;
+  const trimmed = typeof raw.payout_address === "string" ? raw.payout_address.trim() : "";
+  // All upper case carries no checksum, like all lower case (EIP-55); only mixed case is checked.
+  const address = /^0x[0-9A-F]{40}$/.test(trimmed) ? trimmed.toLowerCase() : trimmed;
+  if (!isAddress(address, { strict: true })) {
+    errors.push({ field: "payout_address", message: "must be a Kite testnet address (0x + 40 hex, valid checksum if mixed case)" });
+  } else {
+    payoutAddress = getAddress(address);
+    if (payoutAddress === zeroAddress) errors.push({ field: "payout_address", message: "must not be the zero address" });
+    else if (payoutAddress === config.payTo) errors.push({ field: "payout_address", message: "must not be the platform escrow wallet" });
+  }
+
+  if (errors.length > 0 || payoutAddress === null) return { ok: false, errors };
+  return { ok: true, value: { answer, payoutAddress } };
 }

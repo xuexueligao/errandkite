@@ -1,29 +1,67 @@
-import { Hono, type MiddlewareHandler } from "hono";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { HTTPFacilitatorClient, type FacilitatorClient } from "@x402/core/server";
 import { decodePaymentResponseHeader } from "@x402/core/http";
 import type { AssetAmount } from "@x402/core/types";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { paymentMiddleware, x402ResourceServer } from "@x402/hono";
 import { ConfigError, loadConfig, type Config } from "./config.js";
-import { activateBounty, getBounty, insertPendingBounty, listPublicBounties, PUBLIC_STATUSES, voidBounty, type BountyRow, type BountyStatus } from "./db.js";
+import { createChainTransfers } from "./chain.js";
+import {
+  activateBounty,
+  getAnswer,
+  getBounty,
+  getBountyWithCount,
+  insertAnswer,
+  insertPendingBounty,
+  listAnswers,
+  listPublicBounties,
+  markAccepting,
+  markCancelled,
+  PUBLIC_STATUSES,
+  voidBounty,
+  type BountyRow,
+  type BountyStatus,
+  type BountyWithCount,
+} from "./db.js";
 import type { Env } from "./env.js";
 import { kiteMoneyParser } from "./kite.js";
-import { hashToken, newBountyId, newManageToken } from "./tokens.js";
-import { parseBountyInput, type BountyInput } from "./validation.js";
+import { hashToken, newAnswerId, newBountyId, newManageToken } from "./tokens.js";
+import { advanceTransfer, type TokenTransfers } from "./transfers.js";
+import { parseAnswerInput, parseBountyInput, type BountyInput } from "./validation.js";
 
-type Vars = { config: Config; bountyInput: BountyInput; createdBountyId: string };
+type Vars = { config: Config; bountyInput: BountyInput; createdBountyId: string; ownedBounty: BountyRow };
 export type AppEnv = { Bindings: Env; Variables: Vars };
 
 export interface AppDeps {
   /** Injected in tests; production talks to the pieverse facilitator over HTTP. */
   facilitator?: FacilitatorClient;
   now?: () => number;
+  /** Injected in tests. Production signs with PLATFORM_PRIVATE_KEY; null when it is not set. */
+  transfers?: (config: Config, env: Env) => TokenTransfers | null;
+  /** How long accept/cancel wait for the transfer receipt before answering. */
+  transferWaitMs?: number;
+}
+
+/** Builds the transfer client from the environment, or null when no key is configured. */
+export function defaultTransfers(config: Config, env: Env): TokenTransfers | null {
+  return env.PLATFORM_PRIVATE_KEY ? createChainTransfers(config, env.PLATFORM_PRIVATE_KEY) : null;
 }
 
 const errorBody = (code: string, message: string, details?: unknown) => ({ error: { code, message, ...(details ? { details } : {}) } });
 
-/** Public view of a bounty. Never includes the manage token hash. */
-function publicBounty(row: BountyRow) {
+/** Transaction of the final transfer, labelled by what it is. */
+function transferView(row: BountyRow) {
+  const payout = row.status === "accepting" || row.status === "paid";
+  const refund = row.status === "refunding" || row.status === "refunded";
+  return {
+    payout_tx: payout ? row.transfer_tx : null,
+    payout_to: payout ? row.transfer_to : null,
+    refund_tx: refund ? row.transfer_tx : null,
+  };
+}
+
+/** Public view of a bounty. Never includes the manage token hash, answer texts or the signed transaction. */
+function publicBounty(row: BountyWithCount) {
   return {
     id: row.id,
     status: row.status,
@@ -37,11 +75,20 @@ function publicBounty(row: BountyRow) {
     payment_tx: row.payment_tx,
     created_at: row.created_at,
     expires_at: row.expires_at,
+    answer_count: row.answer_count,
+    ...transferView(row),
   };
+}
+
+/** What the poster sees: the public view plus the accepted answer and any transfer error. */
+function ownerBounty(row: BountyWithCount) {
+  return { ...publicBounty(row), accepted_answer_id: row.accepted_answer_id, transfer_error: row.transfer_error };
 }
 
 export function createApp(deps: AppDeps = {}) {
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
+  const makeTransfers = deps.transfers ?? defaultTransfers;
+  const transferWaitMs = deps.transferWaitMs ?? 20_000;
   const app = new Hono<AppEnv>();
 
   // One payment middleware per isolate and configuration.
@@ -186,9 +233,120 @@ export function createApp(deps: AppDeps = {}) {
   });
 
   app.get("/api/bounties/:id", async (c) => {
-    const row = await getBounty(c.env.DB, c.req.param("id"));
+    const row = await getBountyWithCount(c.env.DB, c.req.param("id"));
     if (!row || !PUBLIC_STATUSES.includes(row.status)) return c.json(errorBody("not_found", "No such bounty."), 404);
     return c.json({ bounty: publicBounty(row) });
+  });
+
+  // Anyone can answer; no account, just a payout address.
+  app.post("/api/bounties/:id/answers", async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json(errorBody("invalid_json", "Request body must be JSON."), 400);
+    }
+    const bounty = await getBounty(c.env.DB, c.req.param("id"));
+    if (!bounty || !PUBLIC_STATUSES.includes(bounty.status)) return c.json(errorBody("not_found", "No such bounty."), 404);
+    const parsed = parseAnswerInput(body, c.get("config"));
+    if (!parsed.ok) return c.json(errorBody("invalid_request", "The answer is not valid.", parsed.errors), 400);
+
+    const id = newAnswerId();
+    const createdAt = now();
+    const result = await insertAnswer(c.env.DB, {
+      id,
+      bounty_id: bounty.id,
+      body: parsed.value.answer,
+      payout_address: parsed.value.payoutAddress,
+      created_at: createdAt,
+    });
+    if (result === "closed") return c.json(errorBody("bounty_closed", "This bounty no longer takes answers."), 409);
+    if (result === "duplicate") return c.json(errorBody("duplicate_answer", "This address already answered this bounty."), 409);
+    if (result === "too_many") return c.json(errorBody("too_many_answers", "This bounty has reached its answer limit."), 409);
+    return c.json({ answer: { id, bounty_id: bounty.id, payout_address: parsed.value.payoutAddress, created_at: createdAt } }, 201);
+  });
+
+  // Reading answers, accepting and cancelling need the manage token returned when the bounty was posted.
+  const requireManageToken: MiddlewareHandler<AppEnv> = async (c, next) => {
+    const auth = (c.req.header("Authorization") ?? "").trim();
+    const match = /^Bearer\s+(mt_[0-9a-f]{64})$/.exec(auth);
+    if (!match) return c.json(errorBody("unauthorized", "Send the manage token as: Authorization: Bearer mt_…"), 401);
+    const bounty = await getBounty(c.env.DB, c.req.param("id") ?? "");
+    // Same answer for "no such bounty" and "wrong token", so the endpoint cannot be used to probe ids.
+    if (!bounty || !PUBLIC_STATUSES.includes(bounty.status) || bounty.manage_token_hash !== (await hashToken(match[1]))) {
+      return c.json(errorBody("forbidden", "The manage token does not match this bounty."), 403);
+    }
+    c.set("ownedBounty", bounty);
+    await next();
+  };
+
+  app.get("/api/bounties/:id/answers", requireManageToken, async (c) => {
+    const bounty = c.get("ownedBounty");
+    const answers = await listAnswers(c.env.DB, bounty.id);
+    return c.json({
+      bounty_status: bounty.status,
+      accepted_answer_id: bounty.accepted_answer_id,
+      answers: answers.map((a) => ({
+        id: a.id,
+        answer: a.body,
+        payout_address: a.payout_address,
+        created_at: a.created_at,
+        accepted: a.id === bounty.accepted_answer_id,
+      })),
+    });
+  });
+
+  // Tries the transfer once right away, so on a quick chain one call is enough.
+  // Whatever is left (pending receipt, RPC error) is finished by the cron job.
+  const startTransfer = async (c: Context<AppEnv>, id: string) => {
+    let transfers: TokenTransfers | null = null;
+    try {
+      transfers = makeTransfers(c.get("config"), c.env);
+    } catch (err) {
+      console.error(JSON.stringify({ event: "transfers_config_error", message: (err as Error).message }));
+    }
+    const row = await getBounty(c.env.DB, id);
+    if (row) {
+      try {
+        await advanceTransfer(c.env.DB, transfers, row, now(), transferWaitMs);
+      } catch (err) {
+        console.error(JSON.stringify({ event: "transfer_error", bounty_id: id, message: (err as Error).message }));
+      }
+    }
+    const updated = await getBountyWithCount(c.env.DB, id);
+    return c.json({ bounty: ownerBounty(updated!) });
+  };
+
+  app.post("/api/bounties/:id/accept", requireManageToken, async (c) => {
+    const bounty = c.get("ownedBounty");
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json(errorBody("invalid_json", "Request body must be JSON."), 400);
+    }
+    const answerId = (body as { answer_id?: unknown } | null)?.answer_id;
+    if (typeof answerId !== "string") return c.json(errorBody("invalid_request", "answer_id is required."), 400);
+    const answer = await getAnswer(c.env.DB, bounty.id, answerId);
+    if (!answer) return c.json(errorBody("not_found", "No such answer on this bounty."), 404);
+
+    if (!(await markAccepting(c.env.DB, bounty.id, answer, now()))) {
+      const current = await getBounty(c.env.DB, bounty.id);
+      const expired = current !== null && (current.status === "open" || current.status === "answered") && current.expires_at <= now();
+      if (expired) return c.json(errorBody("bounty_expired", "The bounty has expired and will be refunded."), 409);
+      return c.json(errorBody("bounty_not_acceptable", `The bounty is ${current?.status}; an answer can only be accepted once.`), 409);
+    }
+    console.log(JSON.stringify({ event: "bounty_accepting", bounty_id: bounty.id, answer_id: answer.id }));
+    return startTransfer(c, bounty.id);
+  });
+
+  app.post("/api/bounties/:id/cancel", requireManageToken, async (c) => {
+    const bounty = c.get("ownedBounty");
+    if (!(await markCancelled(c.env.DB, bounty.id, now()))) {
+      return c.json(errorBody("bounty_not_cancellable", "Only an open bounty without answers can be cancelled."), 409);
+    }
+    console.log(JSON.stringify({ event: "bounty_cancelled", bounty_id: bounty.id }));
+    return startTransfer(c, bounty.id);
   });
 
   app.notFound((c) => c.json(errorBody("not_found", "No such route."), 404));
