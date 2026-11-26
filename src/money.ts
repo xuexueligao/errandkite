@@ -11,3 +11,12 @@ export function decimalToUnits(value: string, decimals: number): bigint | null {
   if (fraction.length > decimals) return null;
   return BigInt(whole + fraction.padEnd(decimals, "0"));
 }
+
+/** Formats base units as a plain decimal string without trailing zeros, e.g. 100000000000000000n -> "0.1". */
+export function unitsToDecimal(units: bigint, decimals: number): string {
+  const negative = units < 0n;
+  const digits = (negative ? -units : units).toString().padStart(decimals + 1, "0");
+  const whole = digits.slice(0, digits.length - decimals);
+  const fraction = digits.slice(digits.length - decimals).replace(/0+$/, "");
+  return `${negative ? "-" : ""}${whole}${fraction ? `.${fraction}` : ""}`;
+}

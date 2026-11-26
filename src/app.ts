@@ -5,7 +5,7 @@ import type { AssetAmount } from "@x402/core/types";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { paymentMiddleware, x402ResourceServer } from "@x402/hono";
 import { ConfigError, loadConfig, type Config } from "./config.js";
-import { createChainTransfers } from "./chain.js";
+import { createChainTransfers, createEscrowReader, type EscrowReader } from "./chain.js";
 import {
   activateBounty,
   getAnswer,
@@ -25,6 +25,8 @@ import {
 } from "./db.js";
 import type { Env } from "./env.js";
 import { kiteMoneyParser } from "./kite.js";
+import { ANSWER_LIMITS, rateKey, recordHits, retryAfter, type RateLimit } from "./ratelimit.js";
+import { escrowReport, escrowView, usageStats } from "./stats.js";
 import { hashToken, newAnswerId, newBountyId, newManageToken } from "./tokens.js";
 import { advanceTransfer, type TokenTransfers } from "./transfers.js";
 import { parseAnswerInput, parseBountyInput, type BountyInput } from "./validation.js";
@@ -40,11 +42,19 @@ export interface AppDeps {
   transfers?: (config: Config, env: Env) => TokenTransfers | null;
   /** How long accept/cancel wait for the transfer receipt before answering. */
   transferWaitMs?: number;
+  /** Injected in tests. Production reads the wallet balance over RPC. */
+  escrowReader?: (config: Config) => EscrowReader | null;
+  /** How long one isolate reuses a /api/stats response. */
+  statsCacheSeconds?: number;
 }
 
 /** Builds the transfer client from the environment, or null when no key is configured. */
 export function defaultTransfers(config: Config, env: Env): TokenTransfers | null {
   return env.PLATFORM_PRIVATE_KEY ? createChainTransfers(config, env.PLATFORM_PRIVATE_KEY) : null;
+}
+
+export function defaultEscrowReader(config: Config): EscrowReader {
+  return createEscrowReader(config);
 }
 
 const errorBody = (code: string, message: string, details?: unknown) => ({ error: { code, message, ...(details ? { details } : {}) } });
@@ -89,6 +99,9 @@ export function createApp(deps: AppDeps = {}) {
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
   const makeTransfers = deps.transfers ?? defaultTransfers;
   const transferWaitMs = deps.transferWaitMs ?? 20_000;
+  const makeEscrowReader = deps.escrowReader ?? defaultEscrowReader;
+  const statsCacheSeconds = deps.statsCacheSeconds ?? 30;
+  let statsCache: { at: number; body: unknown } | undefined;
   const app = new Hono<AppEnv>();
 
   // One payment middleware per isolate and configuration.
@@ -238,6 +251,32 @@ export function createApp(deps: AppDeps = {}) {
     return c.json({ bounty: publicBounty(row) });
   });
 
+  // Public usage numbers and the escrow books checked against the wallet.
+  app.get("/api/stats", async (c) => {
+    c.header("Cache-Control", `public, max-age=${statsCacheSeconds}`);
+    const at = now();
+    if (statsCache && at - statsCache.at < statsCacheSeconds) return c.json(statsCache.body);
+    const config = c.get("config");
+    let reader: EscrowReader | null = null;
+    try {
+      reader = makeEscrowReader(config);
+    } catch (err) {
+      console.error(JSON.stringify({ event: "escrow_reader_error", message: (err as Error).message }));
+    }
+    const [usage, escrow] = await Promise.all([usageStats(c.env.DB), escrowReport(c.env.DB, reader)]);
+    const body = {
+      network: config.chain.network,
+      asset: config.chain.assetAddress,
+      asset_symbol: config.chain.assetSymbol,
+      escrow_address: config.payTo,
+      generated_at: at,
+      ...usage,
+      escrow: escrowView(escrow, config.chain.assetDecimals),
+    };
+    statsCache = { at, body };
+    return c.json(body);
+  });
+
   // Anyone can answer; no account, just a payout address.
   app.post("/api/bounties/:id/answers", async (c) => {
     let body: unknown;
@@ -251,8 +290,21 @@ export function createApp(deps: AppDeps = {}) {
     const parsed = parseAnswerInput(body, c.get("config"));
     if (!parsed.ok) return c.json(errorBody("invalid_request", "The answer is not valid.", parsed.errors), 400);
 
-    const id = newAnswerId();
+    // Limits per client IP and per payout address. Cloudflare always sets
+    // CF-Connecting-IP; without it (local tools) only the address limit applies.
     const createdAt = now();
+    const ip = c.req.header("CF-Connecting-IP");
+    const hits: { limit: RateLimit; key: string }[] = [{ limit: ANSWER_LIMITS.address, key: await rateKey(parsed.value.payoutAddress) }];
+    if (ip) hits.push({ limit: ANSWER_LIMITS.ip, key: await rateKey(ip) });
+    for (const hit of hits) {
+      const wait = await retryAfter(c.env.DB, hit.limit, hit.key, createdAt);
+      if (wait > 0) {
+        c.header("Retry-After", String(wait));
+        return c.json(errorBody("rate_limited", `Too many answers. Try again in ${wait} seconds.`, { retry_after: wait }), 429);
+      }
+    }
+
+    const id = newAnswerId();
     const result = await insertAnswer(c.env.DB, {
       id,
       bounty_id: bounty.id,
@@ -263,6 +315,7 @@ export function createApp(deps: AppDeps = {}) {
     if (result === "closed") return c.json(errorBody("bounty_closed", "This bounty no longer takes answers."), 409);
     if (result === "duplicate") return c.json(errorBody("duplicate_answer", "This address already answered this bounty."), 409);
     if (result === "too_many") return c.json(errorBody("too_many_answers", "This bounty has reached its answer limit."), 409);
+    await recordHits(c.env.DB, hits, createdAt);
     return c.json({ answer: { id, bounty_id: bounty.id, payout_address: parsed.value.payoutAddress, created_at: createdAt } }, 201);
   });
 

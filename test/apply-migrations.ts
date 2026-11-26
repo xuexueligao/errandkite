@@ -5,6 +5,7 @@ await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
 
 // Each test starts from empty tables.
 beforeEach(async () => {
+  await env.DB.prepare("DELETE FROM rate_hits").run();
   await env.DB.prepare("DELETE FROM answers").run();
   await env.DB.prepare("DELETE FROM bounties").run();
 });

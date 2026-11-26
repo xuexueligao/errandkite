@@ -1,6 +1,6 @@
 # API
 
-> 只列出**已实现**的接口。还没做的（统计 `/api/stats`、MCP 工具）见 [PROPOSAL.md](PROPOSAL.md) 5.3、5.4 节。
+> 只列出**已实现**的接口。还没做的（MCP 工具）见 [PROPOSAL.md](PROPOSAL.md) 5.4 节。
 
 所有响应都是 JSON。错误统一是：
 
@@ -22,6 +22,7 @@
 | 409 | `bounty_expired` | 采纳时悬赏已到期，会被退款 |
 | 409 | `bounty_not_acceptable` | 悬赏不在可采纳状态（例如已经采纳过） |
 | 409 | `bounty_not_cancellable` | 只有还没人回答的 `open` 悬赏能取消 |
+| 429 | `rate_limited` | 回答太频繁；响应头 `Retry-After` 和 `details.retry_after` 是要等的秒数 |
 | 500 | `server_misconfigured` | 部署配置有误（例如 `KITE_NETWORK` 不是 testnet） |
 | 500 | `activation_failed` | 付款已结算但悬赏没能写成 `open`；响应里有 `bounty_id` 和 `payment_tx`，请保留，用于人工对账 |
 | 500 | `internal_error` | 其他未预期错误 |
@@ -111,6 +112,15 @@
 
 返回 **201** `{ "answer": { "id": "ans_…", "bounty_id": "bty_…", "payout_address": "0x…（校验和格式）", "created_at": … } }`。第一个回答会把悬赏从 `open` 变成 `answered`。同一地址对同一悬赏只能答一次（不分大小写）；到期后返回 409 `bounty_closed`，即使定时任务还没跑。
 
+**限流**（状态存 D1，不存内存）：
+
+| 维度 | 上限 | 说明 |
+|---|---|---|
+| 客户端 IP（`CF-Connecting-IP`） | 10 分钟 10 个 | Cloudflare 线上总会带这个头；本地没有这个头时只按地址限 |
+| 收款地址（跨所有悬赏） | 1 小时 20 个 | 不分大小写 |
+
+只有成功提交的回答才计数，被拒绝的（400、409）不算。超限返回 429 `rate_limited`。数据库里只存 IP 和地址的 SHA-256 哈希，定时任务删除一天以前的记录。检查和计数是两步，同时并发的请求可能多放过几个；这是防刷，不涉及资金。
+
 ## 发布方接口（要管理令牌）
 
 请求头：`Authorization: Bearer mt_…`
@@ -134,10 +144,45 @@
 
 只能取消还没人回答的 `open` 悬赏。悬赏变为 `refunding`，全额退回 `payer`，响应格式同采纳（`refunded` 或 `refunding`）。
 
+## `GET /api/stats`：公开统计和托管对账
+
+```json
+{
+  "network": "eip155:2368", "asset": "0x38129cf4…", "asset_symbol": "pieUSD", "escrow_address": "0x7ec5…", "generated_at": 1795705224,
+  "bounties": { "total": 3, "by_source": { "agent": 2, "manual": 1 }, "by_status": { "open": 1, "answered": 0, "accepting": 0, "paid": 1, "refunding": 0, "refunded": 1 }, "accepted": 1, "refunded": 1 },
+  "answers": { "total": 1, "distinct_answerers": 1 },
+  "distinct_payers": 1,
+  "median_seconds_to_first_answer": 90,
+  "escrow": {
+    "status": "ok",
+    "received": { "units": "300000000000000000", "usd": "0.3" },
+    "paid_out": { "units": "100000000000000000", "usd": "0.1" },
+    "refunded": { "units": "100000000000000000", "usd": "0.1" },
+    "held": { "units": "100000000000000000", "usd": "0.1" },
+    "in_flight": { "units": "0", "usd": "0" },
+    "wallet_balance": { "units": "100000000000000000", "usd": "0.1" },
+    "gas_balance_wei": "499731103113000000",
+    "gas_low": false
+  }
+}
+```
+
+- 只统计付款已结算的悬赏（作废的、没付成的不算）。`by_source` 把 agent 发布和人工测试分开
+- `held` = 还在托管里的钱 = `received` − `paid_out` − `refunded`，按 bigint 精确相加（18 位小数的金额超过约 9 pieUSD 就会超出 SQLite 整数范围，所以不在 SQL 里求和）
+- `wallet_balance` 是平台钱包在链上的 pieUSD 余额。`escrow.status`：
+  - `ok`：钱包余额 ≥ `held`
+  - `settling`：差额不超过 `in_flight`（已签名、可能已上链但还没记账的放款或退款），定时任务会补上
+  - `short`：钱少了，需要人工处理
+  - `unknown`：链上余额没读到（RPC 超时等）
+- `gas_low`：钱包的 KITE 少于 0.01，放款和退款可能付不起 gas
+- 每个 Worker 实例缓存 30 秒（`Cache-Control: public, max-age=30`），因为要读两次 RPC
+
 ## 定时任务（每 5 分钟）
 
 1. `open` / `answered` 且已过 `expires_at` 的悬赏 → `refunding`，退款对象是 `payer`
 2. 推进所有 `accepting` / `refunding` 的转账，每次最多 10 个
+3. 删除一天以前的限流记录
+4. 托管对账：和 `/api/stats` 的 `escrow` 同样的检查，每次都写一条 `escrow_check` 日志；`short` 或 `gas_low` 用 error 级别，`settling` / `unknown` 用 warn 级别
 
 ### 转账怎么保证只到账一次
 

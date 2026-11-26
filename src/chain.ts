@@ -22,6 +22,33 @@ const ALREADY_KNOWN = /already known|known transaction|already imported/i;
 
 export class TransferConfigError extends Error {}
 
+function viemChain(config: Config) {
+  const chainId = Number(config.chain.network.split(":")[1]);
+  return defineChain({
+    id: chainId,
+    name: `Kite ${chainId}`,
+    nativeCurrency: { name: "KITE", symbol: "KITE", decimals: 18 },
+    rpcUrls: { default: { http: [config.chain.rpcUrl] } },
+  });
+}
+
+/** Read-only view of the platform wallet (PAY_TO). Needs no private key. */
+export interface EscrowReader {
+  /** pieUSD held by the wallet, in base units. */
+  tokenBalance(): Promise<bigint>;
+  /** Native KITE for gas, in wei. */
+  gasBalance(): Promise<bigint>;
+}
+
+export function createEscrowReader(config: Config): EscrowReader {
+  const client = createPublicClient({ chain: viemChain(config), transport: http(config.chain.rpcUrl, { timeout: 12_000 }) });
+  return {
+    tokenBalance: () =>
+      client.readContract({ address: getAddress(config.chain.assetAddress), abi: erc20Abi, functionName: "balanceOf", args: [config.payTo] }),
+    gasBalance: () => client.getBalance({ address: config.payTo }),
+  };
+}
+
 /**
  * pieUSD transfers from the platform wallet, signed with PLATFORM_PRIVATE_KEY.
  * The key must belong to PAY_TO, the wallet that receives bounty payments.
@@ -33,13 +60,7 @@ export function createChainTransfers(config: Config, privateKey: string): TokenT
     throw new TransferConfigError("PLATFORM_PRIVATE_KEY does not belong to PAY_TO");
   }
 
-  const chainId = Number(config.chain.network.split(":")[1]);
-  const chain = defineChain({
-    id: chainId,
-    name: `Kite ${chainId}`,
-    nativeCurrency: { name: "KITE", symbol: "KITE", decimals: 18 },
-    rpcUrls: { default: { http: [config.chain.rpcUrl] } },
-  });
+  const chain = viemChain(config);
   const client = createPublicClient({ chain, transport: http(config.chain.rpcUrl, { timeout: 15_000 }) });
   const wallet = createWalletClient({ account, chain, transport: http(config.chain.rpcUrl, { timeout: 15_000 }) });
   const asset = getAddress(config.chain.assetAddress);

@@ -31,21 +31,38 @@ export class FakeFacilitator implements FacilitatorClient {
   }
 }
 
+/** The platform wallet as seen on chain. A balance set to an Error makes that read fail. */
+export class FakeEscrow {
+  token: bigint | Error = 0n;
+  gas: bigint | Error = 10n ** 18n;
+  async tokenBalance() {
+    if (this.token instanceof Error) throw this.token;
+    return this.token;
+  }
+  async gasBalance() {
+    if (this.gas instanceof Error) throw this.gas;
+    return this.gas;
+  }
+}
+
 export interface MakeAppOptions {
   /** null means "payouts not configured". */
   chain?: FakeChain | null;
   clock?: { now: number };
+  /** Wallet balances for /api/stats and the cron escrow check; null means none can be read. */
+  escrow?: FakeEscrow | null;
 }
 
 export function makeApp(options: MakeAppOptions = {}) {
   const facilitator = new FakeFacilitator();
   const chain = options.chain === undefined ? new FakeChain() : options.chain;
   const clock = options.clock ?? { now: Math.floor(Date.now() / 1000) };
-  const deps = { now: () => clock.now, transfers: () => chain, transferWaitMs: 1 };
-  const app = createApp({ facilitator, ...deps });
+  const escrow = options.escrow === undefined ? new FakeEscrow() : options.escrow;
+  const deps = { now: () => clock.now, transfers: () => chain, transferWaitMs: 1, escrowReader: () => escrow };
+  const app = createApp({ facilitator, statsCacheSeconds: 0, ...deps });
   const request = (path: string, init?: RequestInit) => app.request(path, init, env);
   const runSweep = () => sweep(env, deps);
-  return { app, facilitator, request, chain, clock, runSweep };
+  return { app, facilitator, request, chain, clock, escrow, runSweep };
 }
 
 export const postJson = (body: unknown, headers: Record<string, string> = {}): RequestInit => ({

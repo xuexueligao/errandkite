@@ -5,6 +5,11 @@
 ## [Unreleased]
 
 ### Added
+- `GET /api/stats`：公开使用统计（悬赏按来源和状态分开、回答数、不同回答者和付款方数、首个回答用时中位数）和托管对账（已收、已放款、已退款、托管中、在途金额，平台钱包链上 pieUSD 和 KITE 余额，状态 ok / settling / short / unknown，gas 不足标记）
+- 定时任务每次运行都做托管对账并写 `escrow_check` 日志，同时清理一天以前的限流记录
+- 回答限流：每个 IP 10 分钟 10 个、每个收款地址 1 小时 20 个，超限返回 429 和 `Retry-After`；D1 迁移 `0003_rate_hits.sql`，只存哈希
+- 19 条新测试（共 87 条）：账目跟着放款、退款、在途转账走，未结算悬赏不计入，超过 SQLite 整数范围的金额精确相加，钱包读不到，gas 不足，限流窗口、跨 IP、跨悬赏、只计成功回答、哈希存储与清理
+- 真实链上验证：本地 `wrangler dev` 下 `/api/stats` 读到平台钱包的链上余额（0 pieUSD、0.4997 KITE，与直接调用 RPC 结果一致），`/__scheduled` 触发定时任务写出 `escrow_check` 日志（2026-11-26）
 - 回答：`POST /api/bounties/:id/answers`，不用登录，答案 + 收款地址（EIP-55 校验和、同地址每悬赏一次、每悬赏最多 50 个、到期不收）
 - 发布方接口（要管理令牌）：`GET /api/bounties/:id/answers` 读回答，`POST /api/bounties/:id/accept` 采纳并放款，`POST /api/bounties/:id/cancel` 无人回答时取消并退款
 - 放款 / 退款状态机 `src/transfers.ts`：先存签名交易再广播，重试只重发同一笔，确认 nonce 被占用且本笔不在链上才重签，5 次失败后停下等人工
