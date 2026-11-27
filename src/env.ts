@@ -1,6 +1,8 @@
 /** Bindings and variables the Worker receives (see wrangler.jsonc and .dev.vars). */
 export interface Env {
   DB: D1Database;
+  /** The web pages in public/. Matching requests never reach the Worker. */
+  ASSETS: Fetcher;
   KITE_NETWORK: string;
   PAY_TO: string;
   MIN_REWARD_USD: string;

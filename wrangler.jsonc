@@ -6,6 +6,9 @@
   // @x402/hono uses Buffer when it settles a payment.
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
+  // The web pages. A request that matches a file here is served without
+  // running the Worker; everything else (/api, /v1, /healthz) goes to it.
+  "assets": { "directory": "./public", "binding": "ASSETS" },
   // Every 5 minutes: refund expired bounties and finish unconfirmed payouts and refunds.
   "triggers": { "crons": ["*/5 * * * *"] },
   "vars": {
