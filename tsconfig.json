@@ -7,10 +7,11 @@
     "types": ["@cloudflare/workers-types", "@cloudflare/vitest-plugin/types"],
     "strict": true,
     "allowJs": true,
+    "allowImportingTsExtensions": true,
     "noUncheckedIndexedAccess": false,
     "skipLibCheck": true,
     "isolatedModules": true,
     "noEmit": true
   },
-  "include": ["src", "test", "vitest.config.ts"]
+  "include": ["src", "test", "mcp", "vitest.config.ts"]
 }

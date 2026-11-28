@@ -5,6 +5,11 @@
 ## [Unreleased]
 
 ### Added
+- MCP 工具（`mcp/server.ts`，stdio，Node 22.18+ 直接运行）：`post_bounty`、`get_bounty`、`get_answers`、`accept_answer`、`cancel_bounty`、`list_my_bounties`
+- `mcp/client.ts`：用官方 x402 SDK（`@x402/core/client` + `@x402/evm/exact/client`）在本地签 EIP-3009 付款；签名前核对网络、代币、方案和金额（必须等于悬赏金额），SDK 花费上限设为该金额，另有客户端总上限 `ERRANDKITE_MAX_REWARD_USD`；管理令牌存本机文件（600 权限）；`get_answers` 结果标注回答为外来数据
+- 依赖：`@modelcontextprotocol/sdk` 1.32.2、`zod` 4.6.6
+- 18 条新测试（共 129 条）：用真实测试私钥签名，假 facilitator 真的验证 EIP-3009 签名（签名者、收款方、金额、Kite 链参数）；签名不对被拒、超上限和非法金额不联系服务器、参数错误不付款、服务器要的金额和悬赏不符时不签名、读回答、采纳放款、取消退款、管不了别人的悬赏
+- 真实环境验证（2026-11-28）：本地 `wrangler dev` 连真实 pieverse facilitator，用 MCP 官方客户端通过 stdio 调用 6 个工具；用没有余额的临时钱包付费发布，真实 facilitator 返回 `insufficient_funds`（不是签名错误），说明付款格式和签名已被接受，只差 pieUSD；付款失败没有生成悬赏
 - 网页（`public/`，Workers 静态资源，不用构建）：悬赏列表（"正在收回答 / 全部"筛选、加载更早的）、详情（金额、状态、回答数、截止时间、付款 / 放款 / 退款交易链接到 KiteScan）、回答表单（先在前端校验，再显示服务端的字段错误、重复回答、限流等提示）；加载中、没数据、出错三种状态；手机宽度和深色模式；所有外来文字用文本节点渲染，测试保证页面脚本不用 innerHTML 等写 HTML 的接口
 - `npm run db:seed:local`：本地演示数据（标为人工测试，没有真实付款）
 - 24 条新测试（共 111 条）：页面辅助函数、错误提示、防 XSS、静态资源可访问、接口仍由 Worker 处理、页面读取的字段在接口里都有

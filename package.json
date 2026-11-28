@@ -8,17 +8,20 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "mcp": "node mcp/server.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "db:migrate:local": "wrangler d1 migrations apply errandkite --local",
     "db:seed:local": "wrangler d1 execute errandkite --local --file scripts/seed-local.sql"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@x402/core": "^2.32.0",
     "@x402/evm": "^2.32.0",
     "@x402/hono": "^2.32.0",
     "hono": "^4.13.21",
-    "viem": "^2.58.6"
+    "viem": "^2.58.6",
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.9.2",
